@@ -20,4 +20,7 @@ pub struct Config {
     /// Port to listen on.
     #[arg(long, value_name = "N", default_value = "8002")]
     pub port: u16,
+
+    #[arg(long, value_name = "DB_URL")]
+    pub db_url: String,
 }

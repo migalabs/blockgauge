@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use string_interner::{DefaultSymbol, StringInterner};
-
+use tokio_postgres::NoTls;
 type Client = DefaultSymbol;
 
 // Two weeks.
@@ -55,11 +55,12 @@ struct NodeSummary {
 type FalseNegatives = BTreeMap<String, usize>;
 
 impl AccuracyTracker {
-    pub fn record_block(
+    pub async fn record_block(
         &mut self,
-        node_name: String,
-        true_label: String,
-        classified_as_name: String,
+        db_url: &str,
+        node_name: &str,
+        true_label: &str,
+        classified_as_name: &str,
         slot: u64,
     ) {
         let true_client = self.interner.get_or_intern(true_label);
@@ -69,7 +70,7 @@ impl AccuracyTracker {
             .nodes_by_client
             .entry(true_client)
             .or_default()
-            .entry(node_name)
+            .entry(node_name.to_string())
             .or_insert_with(|| NodeAccuracy::new(LIMIT));
 
         node.observations.insert(Observation {
@@ -77,6 +78,28 @@ impl AccuracyTracker {
             classified_as,
         });
 
+        match tokio_postgres::connect(db_url, NoTls).await {
+            Ok((client, connection)) => {
+                let f64slot = slot as f64;
+                let connection_handle = tokio::spawn(async move {
+                    if let Err(e) = connection.await {
+                        eprintln!("connection error: {}", e);
+                    }
+                });
+
+                if let Err(e) = client.execute(
+                    "INSERT INTO t_acuracy (f_node_name, f_true_label, f_classified_as_name, f_slot) VALUES ($1, $2, $3, $4)",
+                    &[&node_name, &true_label, &classified_as_name, &f64slot],
+                ).await {
+                    eprintln!("Error inserting record: {}", e);
+                }
+
+                if let Err(e) = connection_handle.await {
+                    eprintln!("Error closing connection: {}", e)
+                }
+            }
+            Err(e) => eprintln!("Error connecting to the database: {}", e),
+        }
         // Prune.
         while node.observations.len() > node.observation_limit {
             node.observations.pop_first();
@@ -142,7 +165,7 @@ impl AccuracyTracker {
 
         // Compute true negative counts.
         let mut true_negatives = BTreeMap::new();
-        for (client1, _) in &clients {
+        for client1 in clients.keys() {
             let mut num_true_negatives = 0;
 
             for (client2, summary2) in &clients {

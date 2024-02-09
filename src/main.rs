@@ -15,6 +15,7 @@ use serde_json::Value;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::sync::RwLock;
+use tokio_postgres::NoTls;
 
 mod accuracy;
 mod classify;
@@ -88,7 +89,15 @@ async fn classify(
         .zip(request.labels)
         .zip(classifications.into_iter().zip(request.blocks.iter()))
     {
-        tracker_guard.record_block(id, true_label, classified_as.best_guess_single, block.slot);
+        tracker_guard
+            .record_block(
+                "",
+                &id,
+                &true_label,
+                &classified_as.best_guess_single,
+                block.slot,
+            )
+            .await;
     }
 
     // Return the unmodified block rewards.
@@ -114,6 +123,9 @@ async fn main() {
 
     let http_client = Client::new();
 
+    // Make this function async and await it
+    psql_create_accuracy_table(&conf.db_url).await;
+
     let tracker = Arc::new(RwLock::new(AccuracyTracker::default()));
 
     let app = Router::new()
@@ -126,7 +138,7 @@ async fn main() {
     let service = app.into_make_service();
 
     let bind_futures = conf.listen_address.iter().map(|listen_address| {
-        let socket_addr = SocketAddr::new(listen_address.clone(), conf.port);
+        let socket_addr = SocketAddr::new(*listen_address, conf.port);
         axum::Server::bind(&socket_addr).serve(service.clone())
     });
 
@@ -135,4 +147,32 @@ async fn main() {
         .into_iter()
         .map(Result::unwrap)
         .for_each(drop);
+}
+
+async fn psql_create_accuracy_table(db_url: &str) {
+    match tokio_postgres::connect(db_url, NoTls).await {
+        Ok((client, connection)) => {
+            let connection_handle = tokio::spawn(async move {
+                if let Err(e) = connection.await {
+                    eprintln!("connection error: {}", e);
+                }
+            });
+
+            if let Err(e) = client
+                .execute(
+                    "CREATE TABLE IF NOT EXISTS t_accuracy(
+                    f_node_name TEXT, 
+                    f_true_label TEXT, 
+                    f_classified_as_name TEXT, 
+                    f_slot BIGINT)",
+                    &[],
+                )
+                .await
+            {
+                println!("Error inserting record: {}", e);
+            }
+            connection_handle.await.unwrap();
+        }
+        Err(e) => println!("Error connecting to the database: {}", e),
+    }
 }

@@ -13,3 +13,4 @@ string-interner = "0.14.0"
 ethereum_serde_utils = "0.5.1"
 clap = { version = "4", features = ["derive"] }
 futures = { version = "0.3.28", default-features = false, features = ["alloc", "std"] }
+tokio-postgres = "0.7.10"
